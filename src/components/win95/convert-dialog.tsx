@@ -1,5 +1,5 @@
 import React, { useCallback, useContext, useEffect, useMemo } from 'react';
-import { Button, WindowHeader, Fieldset, Select, Table, TableBody, TableDataCell, Divider, Toolbar } from 'react95';
+import { Button, WindowHeader, Fieldset, Select, Table, TableBody, TableDataCell, Divider, Toolbar, Checkbox } from 'react95';
 import { DialogOverlay, DialogWindow, DialogFooter, DialogWindowContent, WindowCloseIcon, FooterButton, CustomTableRow } from './common';
 import { TitleFormatType } from '../../redux/convert-dialog-feature';
 import { DropzoneInputProps, DropzoneRootProps } from 'react-dropzone';
@@ -53,6 +53,16 @@ export const W95ConvertDialog = (props: {
     handleRemoveSelectedTrack: () => void;
     handleRenameSelectedTrack: () => void;
     dialogVisible: boolean;
+
+    enableReplayGain: boolean;
+    handleToggleReplayGain: () => void;
+    gaplessSupported: boolean;
+    enableGapless: boolean;
+    handleToggleGapless: () => void;
+    deviceSupportsDiscAtOnce: boolean;
+    canUseDiscAtOnce: boolean;
+    discAtOnceActive: boolean;
+    handleToggleDiscAtOnce: () => void;
 }) => {
     const themeContext = useContext(ThemeContext)!;
     const recordModeOptions = useMemo(() => props.minidiscSpec.availableFormats.map((e, i) => ({ label: e.userFriendlyName ?? e.codec, value: i })), [props.minidiscSpec]);
@@ -109,6 +119,33 @@ export const W95ConvertDialog = (props: {
                             />
                         </Fieldset>
                     </div>
+                    <Fieldset label="Options" style={{ display: 'flex', marginTop: 16 }}>
+                        <Checkbox
+                            name="replayGain"
+                            label="Use ReplayGain"
+                            checked={props.enableReplayGain}
+                            onChange={props.handleToggleReplayGain}
+                        />
+                        <Checkbox
+                            name="gapless"
+                            style={{ marginLeft: 16 }}
+                            label="Gapless"
+                            disabled={!props.gaplessSupported || props.discAtOnceActive}
+                            checked={props.enableGapless && !props.discAtOnceActive}
+                            onChange={props.handleToggleGapless}
+                        />
+                        {props.deviceSupportsDiscAtOnce ? (
+                            <Checkbox
+                                name="discAtOnce"
+                                label="Disc at Once (homebrew)"
+                                title="Uploads all tracks as one continuous recording and splits it afterwards by rewriting the disc's ToC. Not available for already ATRAC-encoded files, or together with Gapless."
+                                style={{ marginLeft: 16 }}
+                                disabled={!props.canUseDiscAtOnce || props.enableGapless}
+                                checked={props.discAtOnceActive}
+                                onChange={props.handleToggleDiscAtOnce}
+                            />
+                        ) : null}
+                    </Fieldset>
                     <p
                         hidden={props.availableCharacters.halfWidth > 0 && props.availableCharacters.fullWidth > 0}
                         style={{ marginTop: '1em' }}

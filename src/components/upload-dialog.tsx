@@ -62,6 +62,7 @@ export const UploadDialog = (props: {}) => {
         trackEncodeProgress,
         trackEncodeProgressOutOf,
         conversionStepName,
+        discAtOnceStage,
     } = useShallowEqualSelector((state) => state.uploadDialog);
     const { vintageMode, notifyWhenFinished, hasNotificationSupport } = useShallowEqualSelector((state) => state.appState);
 
@@ -78,6 +79,31 @@ export const UploadDialog = (props: {}) => {
     const convertedValue = Math.floor((trackConverting / trackTotal) * 100);
     const currentTrackConversionProgress =
         trackEncodeProgressOutOf === 0 ? undefined : Math.floor((trackEncodeProgress / trackEncodeProgressOutOf) * 100);
+
+    let conversionLabel =
+        convertedValue === 100 && trackConverting === trackTotal
+            ? `Conversion completed`
+            : `Converting ${trackConverting + 1} of ${trackTotal}: ${titleConverting}`;
+    let uploadLabel = `Uploading ${trackCurrent} of ${trackTotal}: ${titleCurrent}`;
+    let uploadIndeterminate = false;
+    // Disc at Once converts every track first, then records them as a single recording and splits it afterwards
+    if (discAtOnceStage === 'decoding') {
+        if (!(convertedValue === 100 && trackConverting === trackTotal)) {
+            conversionLabel = `Decoding ${trackConverting + 1} of ${trackTotal}: ${titleConverting}`;
+        }
+        uploadLabel = `Disc at Once: recording starts once all ${trackTotal} tracks are ready`;
+    } else if (discAtOnceStage === 'encoding') {
+        conversionLabel = `Encoding all ${trackTotal} tracks as one continuous stream`;
+        uploadLabel = `Disc at Once: recording starts once encoding is done`;
+    } else if (discAtOnceStage === 'uploading') {
+        conversionLabel = `Conversion completed`;
+        uploadLabel = `Recording all ${trackTotal} tracks as one recording`;
+    } else if (discAtOnceStage === 'splitting') {
+        conversionLabel = `Conversion completed`;
+        uploadLabel = `Splitting the recording into ${trackTotal} tracks (writing the ToC, this takes about a minute)`;
+        uploadIndeterminate = true;
+    }
+    const canCancel = !cancelled && discAtOnceStage !== 'uploading' && discAtOnceStage !== 'splitting';
 
     if (vintageMode) {
         const p = {
@@ -100,6 +126,10 @@ export const UploadDialog = (props: {}) => {
             notifyWhenFinished,
             hasNotificationSupport,
             handleNotifyWhenFinishedChanged,
+            conversionLabel,
+            conversionProgress: currentTrackConversionProgress ?? convertedValue,
+            uploadLabel,
+            canCancel,
         };
         return <W95UploadDialog {...p} />;
     }
@@ -115,9 +145,7 @@ export const UploadDialog = (props: {}) => {
             <DialogTitle id="upload-dialog-slide-title">Recording...</DialogTitle>
             <DialogContent>
                 <DialogContentText id="upload-dialog-slide-description">
-                    {convertedValue === 100 && trackConverting === trackTotal
-                        ? `Conversion completed`
-                        : `Converting ${trackConverting + 1} of ${trackTotal}: ${titleConverting}`}
+                    {conversionLabel}
                 </DialogContentText>
 
                 <LinearProgress
@@ -133,16 +161,20 @@ export const UploadDialog = (props: {}) => {
                 </Box>
 
                 <DialogContentText id="upload-dialog-slide-description" className={classes.uploadLabel}>
-                    Uploading {trackCurrent} of {trackTotal}: {titleCurrent}
+                    {uploadLabel}
                 </DialogContentText>
-                <LinearProgress
-                    className={classes.progressBar}
-                    variant="buffer"
-                    color="secondary"
-                    value={progressValue}
-                    valueBuffer={bufferValue}
-                />
-                <Box className={classes.progressPerc}>{progressValue}%</Box>
+                {uploadIndeterminate ? (
+                    <LinearProgress className={classes.progressBar} variant="indeterminate" color="secondary" />
+                ) : (
+                    <LinearProgress
+                        className={classes.progressBar}
+                        variant="buffer"
+                        color="secondary"
+                        value={progressValue}
+                        valueBuffer={bufferValue}
+                    />
+                )}
+                <Box className={classes.progressPerc}>{uploadIndeterminate ? '\u00a0' : `${progressValue}%`}</Box>
             </DialogContent>
             <DialogActions>
                 {hasNotificationSupport ? (
@@ -154,7 +186,7 @@ export const UploadDialog = (props: {}) => {
                     />
                 ) : null}
                 <div className={classes.spacer}></div>
-                <Button disabled={cancelled} onClick={handleCancelUpload}>
+                <Button disabled={!canCancel} onClick={handleCancelUpload}>
                     {cancelled ? `Stopping after current track...` : `Cancel Recording`}
                 </Button>
             </DialogActions>

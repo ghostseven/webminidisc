@@ -454,7 +454,7 @@ class NetMDMockService extends NetMDService {
     }
 
     async factory() {
-        return new NetMDFactoryMockService();
+        return new NetMDFactoryMockService(this);
     }
 
     async flush(): Promise<void> {}
@@ -464,6 +464,8 @@ class NetMDMockService extends NetMDService {
     ): Promise<void> {}
 }
 class NetMDFactoryMockService implements NetMDFactoryService {
+    constructor(private parent: NetMDMockService) {}
+
     async prepareDownload(): Promise<void> {}
     async finalizeDownload(): Promise<void> {}
     async setDiscSwapDetection(enable: boolean): Promise<void> {}
@@ -478,7 +480,7 @@ class NetMDFactoryMockService implements NetMDFactoryService {
     }
     async finalizeSPUpload(tracks: { index: number; channels: 1 | 2 }[]): Promise<void> {}
     async getExploitCapabilities() {
-        return [ExploitCapability.downloadAtrac];
+        return [ExploitCapability.downloadAtrac, ExploitCapability.flushUTOC];
     }
 
     mutex = new Mutex();
@@ -507,6 +509,27 @@ class NetMDFactoryMockService implements NetMDFactoryService {
     async runTetris(): Promise<void> {}
 
     async flushUTOCCacheToDisc() {}
+
+    async splitTrackForDAO(trackIndex: number, tracks: { weight: number; halfWidthTitle: string; fullWidthTitle: string }[]) {
+        const weights = tracks.map((t) => t.weight);
+        const source = this.parent._tracks[trackIndex];
+        const totalWeight = weights.reduce((a, b) => a + b, 0);
+        const totalDuration = source.duration;
+        source.duration = Math.round((totalDuration * weights[0]) / totalWeight);
+        for (let i = 1; i < weights.length; i++) {
+            const newTrack: Track = {
+                ...source,
+                title: tracks[i].halfWidthTitle,
+                fullWidthTitle: tracks[i].fullWidthTitle,
+                duration: Math.round((totalDuration * weights[i]) / totalWeight),
+                index: this.parent._tracks.length,
+            };
+            this.parent._tracks.push(newTrack);
+            this.parent._groupsDef[0].tracksIdx.push(newTrack.index);
+        }
+        await sleep(2000);
+        return [];
+    }
 
     async readFirmware(callback: (progress: { type: 'RAM' | 'ROM'; readBytes: number; totalBytes: number }) => void) {
         return {

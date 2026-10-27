@@ -20,6 +20,10 @@ export const W95UploadDialog = (props: {
     notifyWhenFinished: boolean;
     hasNotificationSupport: boolean;
     handleNotifyWhenFinishedChanged: () => void;
+    conversionLabel: string;
+    conversionProgress: number;
+    uploadLabel: string;
+    canCancel: boolean;
 }) => {
     if (!props.visible) {
         return null;
@@ -33,14 +37,12 @@ export const W95UploadDialog = (props: {
                 </WindowHeader>
                 <DialogWindowContent>
                     <div style={{ width: '100%' }}>
-                        {props.convertedValue === 100 && props.trackConverting === props.trackTotal
-                            ? `Conversion completed`
-                            : `Converting ${props.trackConverting + 1} of ${props.trackTotal}: ${props.titleConverting}`}
+                        {props.conversionLabel}
                     </div>
-                    <Progress value={Math.floor(props.convertedValue)} />
+                    <Progress value={Math.floor(props.conversionProgress)} />
 
                     <div style={{ width: '100%', marginTop: 16 }}>
-                        Uploading {props.trackCurrent} of {props.trackTotal}: {props.titleCurrent}
+                        {props.uploadLabel}
                     </div>
                     <Progress value={props.progressValue} />
 
@@ -54,7 +56,7 @@ export const W95UploadDialog = (props: {
                             />
                         ) : null}
                         <div style={{ flex: '1 1 auto' }}></div>
-                        <Button disabled={props.cancelled} onClick={props.handleCancelUpload}>
+                        <Button disabled={!props.canCancel} onClick={props.handleCancelUpload}>
                             {props.cancelled ? `Stopping after current track...` : `Cancel Recording`}
                         </Button>
                     </DialogFooter>

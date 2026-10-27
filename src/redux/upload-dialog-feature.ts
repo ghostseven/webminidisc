@@ -2,6 +2,9 @@ import { createSlice, PayloadAction } from '@reduxjs/toolkit';
 import { stat } from 'fs';
 import { enableBatching } from 'redux-batched-actions';
 
+// Disc at Once uploads go through stages of their own instead of converting and uploading track by track
+export type DiscAtOnceStage = 'decoding' | 'encoding' | 'uploading' | 'splitting';
+
 export interface LoadingDialogState {
     visible: boolean;
     cancelled: boolean;
@@ -21,6 +24,8 @@ export interface LoadingDialogState {
 
     trackEncodeProgress: number;
     trackEncodeProgressOutOf: number;
+
+    discAtOnceStage: DiscAtOnceStage | null;
 }
 
 const initialState: LoadingDialogState = {
@@ -43,6 +48,8 @@ const initialState: LoadingDialogState = {
     trackEncodeProgressOutOf: 0,
 
     conversionStepName: null,
+
+    discAtOnceStage: null,
 };
 
 export const slice = createSlice({
@@ -56,6 +63,9 @@ export const slice = createSlice({
             state.encryptedProgress = action.payload.encrypted;
             state.writtenProgress = action.payload.written;
             state.totalProgress = action.payload.total;
+        },
+        setDiscAtOnceStage: (state, action: PayloadAction<DiscAtOnceStage | null>) => {
+            state.discAtOnceStage = action.payload;
         },
         setCancelUpload: (state, action: PayloadAction<boolean>) => {
             state.cancelled = action.payload;
