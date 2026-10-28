@@ -36,7 +36,7 @@ import {
 } from 'netmd-js';
 import { makeGetAsyncPacketIteratorOnWorkerThread } from 'netmd-js/dist/web-encrypt-worker';
 import { Logger } from 'netmd-js/dist/logger';
-import { sanitizeHalfWidthTitle, sanitizeFullWidthTitle, concatUint8Arrays } from 'netmd-js/dist/utils';
+import { sanitizeHalfWidthTitle, sanitizeFullWidthTitle, concatUint8Arrays, encodeToSJIS } from 'netmd-js/dist/utils';
 import { asyncMutex, sleep, isSequential, recomputeGroupsAfterTrackMove, getPublicPathFor } from '../../utils';
 import { Mutex } from 'async-mutex';
 import {
@@ -59,7 +59,8 @@ import {
     EnterServiceMode,
 } from 'netmd-exploits';
 import netmdExploits from 'netmd-exploits';
-import netmdTocmanip from 'netmd-tocmanip';
+import netmdTocmanip, { parseTOC, reconstructTOC } from 'netmd-tocmanip';
+import { splitDAOTrack, setTrackTitleInTOC } from '../dao';
 import { HiMDCodecName } from 'himd-js';
 import Worker from 'netmd-js/dist/web-encrypt-worker?worker';
 
@@ -275,6 +276,12 @@ export interface NetMDFactoryService {
 
     // depend on netmd-exploits:
     flushUTOCCacheToDisc(): Promise<void>;
+    // Splits the (last) track at `trackIndex` into `weights.length` tracks and flushes the UTOC (Disc at Once)
+    // Returns the indices of the tracks whose titles did not fit into the ToC
+    splitTrackForDAO(
+        trackIndex: number,
+        tracks: { weight: number; halfWidthTitle: string; fullWidthTitle: string }[]
+    ): Promise<number[]>;
     runTetris(): Promise<void>;
     readFirmware(
         callback: (progress: { type: 'RAM' | 'ROM' | 'DRAM'; readBytes: number; totalBytes: number }) => void
@@ -876,6 +883,47 @@ class NetMDFactoryUSBService implements NetMDFactoryService {
     @asyncMutex
     async flushUTOCCacheToDisc() {
         await (await this.exploitStateManager.require(ForceTOCEdit)).forceTOCEdit();
+    }
+
+    @asyncMutex
+    async splitTrackForDAO(trackIndex: number, tracks: { weight: number; halfWidthTitle: string; fullWidthTitle: string }[]) {
+        const original: (Uint8Array | null)[] = [];
+        for (let i = 0; i < 4; i++) {
+            try {
+                original.push(await readUTOCSector(this.factoryInterface, i));
+            } catch (err) {
+                // The full-width title sector is optional
+                if (i < 3) throw err;
+                original.push(null);
+            }
+        }
+        const toc = parseTOC(...original);
+        splitDAOTrack(
+            toc,
+            trackIndex + 1,
+            tracks.map((t) => t.weight)
+        );
+        // The first track keeps the title set during the upload. The others get
+        // theirs written straight into the ToC, since the device can't rename
+        // them through NetMD until the disc is reloaded.
+        const untitled: number[] = [];
+        for (let i = 1; i < tracks.length; i++) {
+            const { halfWidthTitle, fullWidthTitle } = tracks[i];
+            let fits = setTrackTitleInTOC(toc, trackIndex + 1 + i, encodeToSJIS(sanitizeHalfWidthTitle(halfWidthTitle)), false);
+            if (fullWidthTitle && original[3]) {
+                fits = setTrackTitleInTOC(toc, trackIndex + 1 + i, encodeToSJIS(sanitizeFullWidthTitle(fullWidthTitle)), true) && fits;
+            }
+            if (!fits) untitled.push(trackIndex + i);
+        }
+        const modified = reconstructTOC(toc, false);
+        for (let i = 0; i < modified.length; i++) {
+            const sector = modified[i];
+            if (sector && original[i] && sector.some((byte, j) => byte !== original[i]![j])) {
+                await writeUTOCSector(this.factoryInterface, i, sector);
+            }
+        }
+        await (await this.exploitStateManager.require(ForceTOCEdit)).forceTOCEdit();
+        return untitled;
     }
 
     @asyncMutex

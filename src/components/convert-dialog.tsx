@@ -293,6 +293,11 @@ export const ConvertDialog = (props: { files: (File | AdaptiveFile)[] }) => {
 
     const usesHimdTitles = useMemo(() => deviceCapabilities.includes(Capability.himdTitles), [deviceCapabilities]);
     const deviceSupportsFullWidth = useMemo(() => deviceCapabilities.includes(Capability.fullWidthSupport), [deviceCapabilities]);
+    // Disc at Once rewrites the NetMD UTOC through the factory mode exploits
+    const deviceSupportsDiscAtOnce = useMemo(
+        () => deviceCapabilities.includes(Capability.factoryMode) && !deviceCapabilities.includes(Capability.himdTitles),
+        [deviceCapabilities]
+    );
 
     const currentlySelectedCodecIndex = useMemo(() => format[minidiscSpec.specName] ?? minidiscSpec.defaultFormat, [format, minidiscSpec]);
     const currentlySelectedCodec = useMemo(
@@ -560,6 +565,7 @@ export const ConvertDialog = (props: { files: (File | AdaptiveFile)[] }) => {
 
     const [enableReplayGain, setEnableReplayGain] = useState(false);
     const [enableGapless, setEnableGapless] = useState(false);
+    const [enableDiscAtOnce, setEnableDiscAtOnce] = useState(false);
 
     const handleToggleReplayGain = useCallback(() => {
         setEnableReplayGain((enableReplayGain) => !enableReplayGain);
@@ -568,6 +574,10 @@ export const ConvertDialog = (props: { files: (File | AdaptiveFile)[] }) => {
     const handleToggleGapless = useCallback(() => {
         setEnableGapless((enableGapless) => !enableGapless);
     }, [setEnableGapless]);
+
+    const handleToggleDiscAtOnce = useCallback(() => {
+        setEnableDiscAtOnce((enableDiscAtOnce) => !enableDiscAtOnce);
+    }, [setEnableDiscAtOnce]);
 
     const handleToggleFullWidthSupport = useCallback(() => {
         dispatch(appActions.setFullWidthSupport(!fullWidthSupport));
@@ -824,6 +834,17 @@ export const ConvertDialog = (props: { files: (File | AdaptiveFile)[] }) => {
 
     const dialogVisible = useShallowEqualSelector((state) => state.convertDialog.visible);
 
+    const canUseDiscAtOnce = useMemo(
+        () =>
+            deviceSupportsDiscAtOnce &&
+            titles.length > 1 &&
+            // Already encoded ATRAC files can't be joined into one recording
+            titles.every((n) => !n.forcedEncoding || (n.forcedEncoding.codec === 'MP3' && currentlySelectedCodec.codec !== 'MP3')),
+        [deviceSupportsDiscAtOnce, titles, currentlySelectedCodec]
+    );
+    // Disc at Once is always gapless, so it and the Gapless option can't be selected together
+    const discAtOnceActive = enableDiscAtOnce && canUseDiscAtOnce;
+
     const handleConvert = useCallback(() => {
         handleClose();
         setEnableReplayGain(false);
@@ -840,11 +861,12 @@ export const ConvertDialog = (props: { files: (File | AdaptiveFile)[] }) => {
                 currentlySelectedCodec,
                 {
                     enableReplayGain,
-                    enableGapless,
+                    enableGapless: enableGapless && !discAtOnceActive,
+                    enableDiscAtOnce: discAtOnceActive,
                 }
             )
         );
-    }, [dispatch, handleClose, titles, currentlySelectedCodec, files, enableReplayGain, enableGapless]);
+    }, [dispatch, handleClose, titles, currentlySelectedCodec, files, enableReplayGain, enableGapless, discAtOnceActive]);
 
     const encoderSupportState = useMemo(
         () => serviceRegistry.audioExportService?.getSupportFor(transferCodecToExportCodec(currentlySelectedCodec).codec) ?? { state: 'unsupported', gapless: false, },
@@ -909,6 +931,16 @@ export const ConvertDialog = (props: { files: (File | AdaptiveFile)[] }) => {
             handleRemoveSelectedTrack,
             handleRenameSelectedTrack,
             dialogVisible,
+
+            enableReplayGain,
+            handleToggleReplayGain,
+            gaplessSupported: encoderSupportState.gapless,
+            enableGapless,
+            handleToggleGapless,
+            deviceSupportsDiscAtOnce,
+            canUseDiscAtOnce,
+            discAtOnceActive,
+            handleToggleDiscAtOnce,
         };
         return <W95ConvertDialog {...p} />;
     }
@@ -1195,9 +1227,22 @@ export const ConvertDialog = (props: { files: (File | AdaptiveFile)[] }) => {
                         <FormControlLabel
                             label={`Gapless`}
                             className={classes.advancedOption}
-                            disabled={!encoderSupportState.gapless}
-                            control={<Checkbox checked={enableGapless} onChange={handleToggleGapless} />}
+                            disabled={!encoderSupportState.gapless || discAtOnceActive}
+                            control={<Checkbox checked={enableGapless && !discAtOnceActive} onChange={handleToggleGapless} />}
                         />
+                        {deviceSupportsDiscAtOnce && (
+                            <Tooltip
+                                title="Uploads all tracks as one continuous recording and splits it afterwards by rewriting the disc's ToC, so there are no gaps between tracks. Requires the homebrew mode. Not available for already ATRAC-encoded files, or together with Gapless."
+                                arrow
+                            >
+                                <FormControlLabel
+                                    label={`Disc at Once (homebrew)`}
+                                    className={classes.advancedOption}
+                                    disabled={!canUseDiscAtOnce || enableGapless}
+                                    control={<Checkbox checked={enableDiscAtOnce && canUseDiscAtOnce} onChange={handleToggleDiscAtOnce} />}
+                                />
+                            </Tooltip>
+                        )}
                     </AccordionDetails>
                 </Accordion>
             </DialogContent>
