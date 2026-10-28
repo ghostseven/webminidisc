@@ -47,7 +47,7 @@
     "jszip": "^3.10.1",
     "lint-staged": "^15.2.2",
     "music-metadata": "^11.10.3",
-    "netmd-exploits": "^0.5.12",
+    "netmd-exploits": "github:ghostseven/netmd-exploits#install-from-git",
     "netmd-js": "^4.4.1",
     "netmd-tocmanip": "^0.2.1",
     "networkwm-js": "^0.2.9",

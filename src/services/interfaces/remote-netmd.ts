@@ -3,12 +3,30 @@ import { Logger } from 'netmd-js/dist/logger';
 import { concatUint8Arrays } from 'netmd-js/dist/utils';
 import { makeGetAsyncPacketIteratorOnWorkerThread } from 'netmd-js/dist/web-encrypt-worker';
 import { asyncMutex } from '../../utils';
-import { Capability, NetMDService, Group, Disc, Track, convertDiscToNJS, convertTrackToNJS, Codec, WireformatDict } from './netmd';
+import {
+    Capability,
+    NetMDService,
+    NetMDFactoryService,
+    ExploitCapability,
+    Group,
+    Disc,
+    Track,
+    convertDiscToNJS,
+    convertTrackToNJS,
+    Codec,
+    WireformatDict,
+} from './netmd';
+import { AtracRecoveryConfig } from 'netmd-exploits';
+import { Mutex } from 'async-mutex';
 import Worker from 'netmd-js/dist/web-encrypt-worker?worker';
 
 // The newest server API this client knows how to use. Servers older than revision 2
 // don't report a revision and lack the newer endpoints (download, finalize, ...).
-const CLIENT_API_REVISION = 2;
+// Revision 3 added the factory mode.
+const CLIENT_API_REVISION = 3;
+
+// The size of the binary messages data is sent to the server in
+const WEBSOCKET_CHUNK_SIZE = 0x10000;
 
 export class NetMDRemoteService extends NetMDService {
     private logger?: Logger;
@@ -77,7 +95,7 @@ export class NetMDRemoteService extends NetMDService {
             .filter((n: Capability | undefined) => n !== undefined);
     }
 
-    private requireServerRevision(revision: number, feature: string) {
+    requireServerRevision(revision: number, feature: string) {
         if (this.serverApiRevision < revision) {
             throw new Error(`${feature} requires a newer version of the Remote NetMD server`);
         }
@@ -99,7 +117,7 @@ export class NetMDRemoteService extends NetMDService {
         return false;
     }
 
-    private async getFromServer(path: string, parameters?: { [key: string]: any }, method: string = 'GET') {
+    async getFromServer(path: string, parameters?: { [key: string]: any }, method: string = 'GET') {
         let jsonData;
         try {
             const url = new URL(`${this.server}/${path}`);
@@ -318,6 +336,78 @@ export class NetMDRemoteService extends NetMDService {
         return new URL(`${servURL.protocol === 'https:' ? 'wss:' : 'ws:'}//${servURL.host}${pathPrefix}${path}`);
     }
 
+    // Runs one of the server's factory mode transfers (see `factoryWebSocket` in the server).
+    // Resolves to the value the server finished with and the binary messages that followed it.
+    factoryTransfer(
+        path: string,
+        parameters: { [key: string]: string },
+        {
+            payload,
+            onProgress,
+            onQuestion,
+            shouldCancel,
+        }: {
+            payload?: Uint8Array;
+            onProgress?: (progress: any) => void;
+            onQuestion?: (question: any) => Promise<any>;
+            shouldCancel?: () => boolean;
+        } = {}
+    ) {
+        return new Promise<{ value: any; buffers: ArrayBuffer[] }>((res, rej) => {
+            const wsURL = this.getWebSocketURL(path);
+            wsURL.search = new URLSearchParams(parameters).toString();
+            const ws = new WebSocket(wsURL.toString());
+            ws.binaryType = 'arraybuffer';
+            let value: any = null;
+            let expectedBuffers = -1;
+            const buffers: ArrayBuffer[] = [];
+            let finished = false;
+            let cancelSent = false;
+            const finish = (callback: () => void) => {
+                finished = true;
+                ws.close();
+                callback();
+            };
+
+            ws.addEventListener('open', () => {
+                if (!payload) return;
+                for (let i = 0; i < payload.length; i += WEBSOCKET_CHUNK_SIZE) {
+                    ws.send(payload.subarray(i, i + WEBSOCKET_CHUNK_SIZE));
+                }
+                ws.send(JSON.stringify({ end: true }));
+            });
+
+            ws.addEventListener('message', async event => {
+                if (event.data instanceof ArrayBuffer) {
+                    buffers.push(event.data);
+                    if (buffers.length === expectedBuffers) finish(() => res({ value, buffers }));
+                    return;
+                }
+                const json = JSON.parse(event.data);
+                if (json.error) {
+                    finish(() => rej(new Error(`Remote NetMD: ${json.error}`)));
+                } else if ('done' in json) {
+                    value = json.done;
+                    expectedBuffers = json.buffers;
+                    if (expectedBuffers === 0) finish(() => res({ value, buffers }));
+                } else if (json.question) {
+                    const answer = await onQuestion!(json.question);
+                    ws.send(JSON.stringify({ answer }));
+                } else if (json.progress) {
+                    onProgress?.(json.progress);
+                    if (!cancelSent && shouldCancel?.()) {
+                        cancelSent = true;
+                        ws.send(JSON.stringify({ cancel: true }));
+                    }
+                }
+            });
+
+            ws.addEventListener('close', () => {
+                if (!finished) rej(new Error('Remote NetMD: the connection was closed before the transfer finished'));
+            });
+        });
+    }
+
     @asyncMutex
     download(index: number, progressCallback: (progress: { read: number; total: number }) => void) {
         this.requireServerRevision(2, 'Downloading tracks');
@@ -392,7 +482,151 @@ export class NetMDRemoteService extends NetMDService {
         return await this.getFromServer('getPosition');
     }
 
+    @asyncMutex
     async factory() {
-        return null;
+        this.requireServerRevision(3, 'The homebrew mode');
+        // The server stops the playback and enters the factory mode
+        const { firmware, capabilities } = await this.getFromServer('factory/init');
+        return new NetMDRemoteFactoryService(
+            this,
+            this.mutex,
+            firmware,
+            capabilities
+                .map((n: keyof typeof ExploitCapability) => ExploitCapability[n])
+                .filter((n: ExploitCapability | undefined) => n !== undefined)
+        );
+    }
+}
+
+// The exploits run on the server, this only forwards the calls to it.
+class NetMDRemoteFactoryService implements NetMDFactoryService {
+    constructor(
+        private parent: NetMDRemoteService,
+        public mutex: Mutex,
+        private firmware: string,
+        private capabilities: ExploitCapability[]
+    ) {}
+
+    async getExploitCapabilities() {
+        return this.capabilities;
+    }
+
+    async getDeviceFirmware() {
+        return this.firmware;
+    }
+
+    @asyncMutex
+    async readUTOCSector(index: number) {
+        return new Uint8Array(await this.parent.getFromServer('factory/readUTOCSector', { index }));
+    }
+
+    @asyncMutex
+    async writeUTOCSector(index: number, data: Uint8Array) {
+        await this.parent.getFromServer('factory/writeUTOCSector', { index, data: Array.from(data) }, 'POST');
+    }
+
+    @asyncMutex
+    async flushUTOCCacheToDisc() {
+        await this.parent.getFromServer('factory/flushUTOC');
+    }
+
+    @asyncMutex
+    async runTetris() {
+        await this.parent.getFromServer('factory/runTetris');
+    }
+
+    @asyncMutex
+    async readRAM(callback?: (progress: { readBytes: number; totalBytes: number }) => void) {
+        const { buffers } = await this.parent.factoryTransfer('factory/readRAM', {}, { onProgress: callback });
+        return new Uint8Array(buffers[0]);
+    }
+
+    @asyncMutex
+    async readFirmware(callback: (progress: { type: 'RAM' | 'ROM' | 'DRAM'; readBytes: number; totalBytes: number }) => void) {
+        const { value: parts, buffers } = await this.parent.factoryTransfer('factory/readFirmware', {}, { onProgress: callback });
+        const firmware: { [part: string]: Uint8Array<ArrayBuffer> } = {};
+        (parts as string[]).forEach((part, i) => (firmware[part] = new Uint8Array(buffers[i])));
+        return firmware as { rom: Uint8Array<ArrayBuffer>; ram: Uint8Array<ArrayBuffer>; dram?: Uint8Array<ArrayBuffer> };
+    }
+
+    @asyncMutex
+    async prepareDownload(useSlowerExploit: boolean) {
+        const fellBack = await this.parent.getFromServer('factory/prepareDownload', { useSlowerExploit });
+        if (fellBack) {
+            alert('Slower exploit is not compatible with this device. Falling back to default');
+        }
+    }
+
+    @asyncMutex
+    async finalizeDownload() {
+        await this.parent.getFromServer('factory/finalizeDownload');
+    }
+
+    @asyncMutex
+    async exploitDownloadTrack(
+        track: number,
+        nerawDownload: boolean,
+        callback: (data: { read: number; total: number; action: 'READ' | 'SEEK' | 'CHUNK'; sector?: string }) => void,
+        config?: AtracRecoveryConfig
+    ) {
+        // The callbacks can't be serialized; they're answered over the WebSocket instead
+        const { shouldCancelImmediately, handleBadSector, ...serializableConfig } = config ?? {};
+        const { value, buffers } = await this.parent.factoryTransfer(
+            'factory/downloadTrack',
+            {
+                track: track.toString(),
+                neraw: nerawDownload.toString(),
+                config: JSON.stringify(serializableConfig),
+            },
+            {
+                onProgress: callback,
+                shouldCancel: shouldCancelImmediately,
+                onQuestion: async ({ badSector }) =>
+                    handleBadSector ? await handleBadSector(badSector.address, badSector.count, badSector.seconds) : 'abort',
+            }
+        );
+        return { data: new Uint8Array(buffers[0]), extension: value.extension as string };
+    }
+
+    @asyncMutex
+    async setSPSpeedupActive(newState: boolean) {
+        await this.parent.getFromServer('factory/setSPSpeedupActive', { enable: newState });
+    }
+
+    @asyncMutex
+    async uploadSP(
+        title: string,
+        fullWidthTitle: string,
+        mono: boolean,
+        data: ArrayBuffer,
+        progressCallback: (progress: { written: number; encrypted: number; total: number }) => void
+    ) {
+        // The server reshapes the data for the exploit and encrypts it, so it's sent as-is
+        const { value: index } = await this.parent.factoryTransfer(
+            'factory/uploadSP',
+            { title, fullWidthTitle, mono: mono.toString() },
+            { payload: new Uint8Array(data), onProgress: progressCallback }
+        );
+        return index as number;
+    }
+
+    @asyncMutex
+    async enableHiMDFullMode() {
+        await this.parent.getFromServer('factory/enableHiMDFullMode');
+    }
+
+    @asyncMutex
+    async enableMonoUpload(enable: boolean) {
+        await this.parent.getFromServer('factory/enableMonoUpload', { enable });
+    }
+
+    @asyncMutex
+    async setDiscSwapDetection(enable: boolean) {
+        await this.parent.getFromServer('factory/setDiscSwapDetection', { enable });
+    }
+
+    @asyncMutex
+    async enterServiceMode() {
+        await this.parent.getFromServer('factory/enterServiceMode');
     }
 }
