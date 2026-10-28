@@ -6,10 +6,15 @@ import { asyncMutex } from '../../utils';
 import { Capability, NetMDService, Group, Disc, Track, convertDiscToNJS, convertTrackToNJS, Codec, WireformatDict } from './netmd';
 import Worker from 'netmd-js/dist/web-encrypt-worker?worker';
 
+// The newest server API this client knows how to use. Servers older than revision 2
+// don't report a revision and lack the newer endpoints (download, finalize, ...).
+const CLIENT_API_REVISION = 2;
+
 export class NetMDRemoteService extends NetMDService {
     private logger?: Logger;
     private server: string;
     private capabilities: Capability[] | null = null;
+    private serverApiRevision = 1;
     private friendlyName: string;
     private useChunkedTransfersForLP: boolean;
 
@@ -62,16 +67,20 @@ export class NetMDRemoteService extends NetMDService {
     }
 
     private async fetchServerCapabilities() {
-        const serverInfo = await this.getFromServer('');
-        if (!serverInfo) throw new Error('Not ready.');
+        const serverInfo = await this.getFromServer('', { client: CLIENT_API_REVISION });
         if (serverInfo.version !== '1.0') {
-            this.logger?.error({
-                method: 'fetchServerCapabilities',
-                info: `Server is on a different version than the service. (1.0 != ${serverInfo.version})`,
-            });
-            return;
+            throw new Error(`The Remote NetMD server is on an unsupported version (${serverInfo.version})`);
         }
-        this.capabilities = serverInfo.capabilities.map((n: any) => Capability[n]);
+        this.serverApiRevision = serverInfo.apiRevision ?? 1;
+        this.capabilities = serverInfo.capabilities
+            .map((n: keyof typeof Capability) => Capability[n])
+            .filter((n: Capability | undefined) => n !== undefined);
+    }
+
+    private requireServerRevision(revision: number, feature: string) {
+        if (this.serverApiRevision < revision) {
+            throw new Error(`${feature} requires a newer version of the Remote NetMD server`);
+        }
     }
 
     async getServiceCapabilities() {
@@ -91,6 +100,7 @@ export class NetMDRemoteService extends NetMDService {
     }
 
     private async getFromServer(path: string, parameters?: { [key: string]: any }, method: string = 'GET') {
+        let jsonData;
         try {
             const url = new URL(`${this.server}/${path}`);
             let body = undefined;
@@ -108,23 +118,21 @@ export class NetMDRemoteService extends NetMDService {
                     'Content-Type': 'application/json',
                 };
             }
-            const jsonData = await (await fetch(url.toString(), { method, body, headers })).json();
-            if (jsonData.ok) {
-                return jsonData.value;
-            } else {
-                this.logger?.error({ method: path, jsonData });
-                return null;
-            }
+            jsonData = await (await fetch(url.toString(), { method, body, headers })).json();
         } catch (ex) {
             this.logger?.error({ method: 'GENERIC', ex });
-            return null;
+            throw new Error(`Cannot reach the Remote NetMD server at ${this.server}`);
         }
+        if (!jsonData.ok) {
+            this.logger?.error({ method: path, jsonData });
+            throw new Error(`Remote NetMD: ${typeof jsonData.error === 'string' ? jsonData.error : `${path || 'connect'} failed`}`);
+        }
+        return jsonData.value;
     }
 
     @asyncMutex
     async listContent(flushCache?: boolean) {
-        if(!flushCache) flushCache = false;
-        return await this.getFromServer('listContent', { flushCache });
+        return await this.getFromServer('listContent', { flushCache: !!flushCache });
     }
 
     @asyncMutex
@@ -139,7 +147,8 @@ export class NetMDRemoteService extends NetMDService {
 
     @asyncMutex
     async finalize() {
-        window.alert('NOT COMPLETE YET');
+        this.requireServerRevision(2, 'Finalizing the disc');
+        await this.getFromServer('finalize');
     }
 
     @asyncMutex
@@ -189,12 +198,19 @@ export class NetMDRemoteService extends NetMDService {
 
     @asyncMutex
     async wipeDiscTitleInfo() {
-        window.alert('Not complete yet');
+        this.requireServerRevision(2, 'Wiping the disc titles');
+        await this.getFromServer('wipeDiscTitleInfo');
+    }
+
+    @asyncMutex
+    async formatToHiMD() {
+        this.requireServerRevision(2, 'Formatting to Hi-MD');
+        await this.getFromServer('formatToHiMD');
     }
 
     @asyncMutex
     async moveTrack(src: number, dst: number, updateGroups?: boolean) {
-        return await this.getFromServer('moveTrack', { src, dst });
+        return await this.getFromServer('moveTrack', { src, dst, updateGroups });
     }
 
     async prepareUpload() {
@@ -223,9 +239,12 @@ export class NetMDRemoteService extends NetMDService {
                 case 'SPS':
                     format = { codec: 'SP' };
                     break;
+                case 'SPM':
+                    this.requireServerRevision(2, 'Mono SP uploads');
+                    format = { codec: 'SPM' };
+                    break;
             }
-            const servURL = new URL(this.server);
-            const wsURL = new URL(`${servURL.protocol === 'https:' ? 'wss:' : 'ws:'}//${servURL.host}/upload`);
+            const wsURL = this.getWebSocketURL('upload');
             //Send file
 
             const total = data.byteLength;
@@ -246,8 +265,8 @@ export class NetMDRemoteService extends NetMDService {
                 updateProgress();
             });
 
-            // A dud track used for the encryption
-            const track = new MDTrack('', WireformatDict[format.codec], data, 0x400, '', webWorkerAsyncPacketIterator);
+            // A dud track used for the encryption. Mono SP is sent as PCM, like stereo SP.
+            const track = new MDTrack('', WireformatDict[format.codec === 'SPM' ? 'SP' : format.codec], data, 0x400, '', webWorkerAsyncPacketIterator);
             const codec = format.codec.toString();
             wsURL.search = new URLSearchParams({
                 title,
@@ -257,10 +276,16 @@ export class NetMDRemoteService extends NetMDService {
                 chunked: (this.useChunkedTransfersForLP && format.codec !== 'SP').toString(),
             }).toString();
             const ws = new WebSocket(wsURL.toString());
+            let finished = false;
 
             ws.addEventListener('message', async event => {
                 const json = JSON.parse(event.data);
-                if (json.init) {
+                if (json.error) {
+                    finished = true;
+                    w.terminate();
+                    ws.close();
+                    rej(new Error(`Remote NetMD: ${json.error}`));
+                } else if (json.init) {
                     // Read and encrypt the file
                     // Send the results of the encryption iterator to the server
                     for await (const piece of track.getPacketWorkerIterator()) {
@@ -271,21 +296,64 @@ export class NetMDRemoteService extends NetMDService {
                     ws.send(new Uint8Array([1]));
                     w.terminate();
                 } else if (json.terminate) {
+                    finished = true;
                     ws.close();
                     res();
                 } else {
-                    written = JSON.parse(event.data).written;
+                    written = json.written;
                     updateProgress();
                 }
             });
 
-            ws.addEventListener('close', () => res());
+            ws.addEventListener('close', () => {
+                w.terminate();
+                if (!finished) rej(new Error('Remote NetMD: the connection was closed before the upload finished'));
+            });
         });
     }
 
+    private getWebSocketURL(path: string) {
+        const servURL = new URL(this.server);
+        const pathPrefix = servURL.pathname.endsWith('/') ? servURL.pathname : `${servURL.pathname}/`;
+        return new URL(`${servURL.protocol === 'https:' ? 'wss:' : 'ws:'}//${servURL.host}${pathPrefix}${path}`);
+    }
+
     @asyncMutex
-    async download(index: number, progressCallback: (progress: { read: number; total: number }) => void) {
-        return null;
+    download(index: number, progressCallback: (progress: { read: number; total: number }) => void) {
+        this.requireServerRevision(2, 'Downloading tracks');
+        return new Promise<{ extension: string; data: Uint8Array<ArrayBuffer> }>((res, rej) => {
+            const wsURL = this.getWebSocketURL('download');
+            wsURL.search = new URLSearchParams({ index: index.toString() }).toString();
+            const ws = new WebSocket(wsURL.toString());
+            ws.binaryType = 'arraybuffer';
+            let extension: string | null = null;
+            let finished = false;
+
+            ws.addEventListener('message', event => {
+                if (event.data instanceof ArrayBuffer) {
+                    // The file itself, sent after its description
+                    finished = true;
+                    ws.close();
+                    res({ extension: extension ?? 'wav', data: new Uint8Array(event.data) });
+                    return;
+                }
+                const json = JSON.parse(event.data);
+                if (json.error) {
+                    finished = true;
+                    ws.close();
+                    rej(new Error(`Remote NetMD: ${json.error}`));
+                } else if (json.extension) {
+                    extension = json.extension;
+                    progressCallback({ read: json.length, total: json.length });
+                } else {
+                    progressCallback({ read: json.read, total: json.total });
+                }
+            });
+
+            ws.addEventListener('close', () => {
+                if (!finished) rej(new Error('Remote NetMD: the connection was closed before the download finished'));
+            });
+        });
     }
 
     @asyncMutex
