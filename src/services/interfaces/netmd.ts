@@ -311,6 +311,53 @@ export interface NetMDFactoryService {
     enterServiceMode(): Promise<void>;
 }
 
+// The UTOC side of NetMDFactoryService.splitTrackForDAO(), shared by the services which implement it.
+// Splits the (last) track at `trackIndex` and writes back the UTOC sectors which changed. Flushing the
+// UTOC to the disc is left to the caller. Returns the indices of the tracks whose titles did not fit.
+export async function splitTrackInUTOC(
+    readSector: (index: number) => Promise<Uint8Array>,
+    writeSector: (index: number, data: Uint8Array) => Promise<void>,
+    trackIndex: number,
+    tracks: { weight: number; halfWidthTitle: string; fullWidthTitle: string }[]
+) {
+    const original: (Uint8Array | null)[] = [];
+    for (let i = 0; i < 4; i++) {
+        try {
+            original.push(await readSector(i));
+        } catch (err) {
+            // The full-width title sector is optional
+            if (i < 3) throw err;
+            original.push(null);
+        }
+    }
+    const toc = parseTOC(...original);
+    splitDAOTrack(
+        toc,
+        trackIndex + 1,
+        tracks.map((t) => t.weight)
+    );
+    // The first track keeps the title set during the upload. The others get
+    // theirs written straight into the ToC, since the device can't rename
+    // them through NetMD until the disc is reloaded.
+    const untitled: number[] = [];
+    for (let i = 1; i < tracks.length; i++) {
+        const { halfWidthTitle, fullWidthTitle } = tracks[i];
+        let fits = setTrackTitleInTOC(toc, trackIndex + 1 + i, encodeToSJIS(sanitizeHalfWidthTitle(halfWidthTitle)), false);
+        if (fullWidthTitle && original[3]) {
+            fits = setTrackTitleInTOC(toc, trackIndex + 1 + i, encodeToSJIS(sanitizeFullWidthTitle(fullWidthTitle)), true) && fits;
+        }
+        if (!fits) untitled.push(trackIndex + i);
+    }
+    const modified = reconstructTOC(toc, false);
+    for (let i = 0; i < modified.length; i++) {
+        const sector = modified[i];
+        if (sector && original[i] && sector.some((byte, j) => byte !== original[i]![j])) {
+            await writeSector(i, sector);
+        }
+    }
+    return untitled;
+}
+
 // Compatibility methods. Do NOT use these unless absolutely necessary!!
 export function convertDiscToWMD(source: NetMDDisc): Disc {
     return {
@@ -887,41 +934,12 @@ class NetMDFactoryUSBService implements NetMDFactoryService {
 
     @asyncMutex
     async splitTrackForDAO(trackIndex: number, tracks: { weight: number; halfWidthTitle: string; fullWidthTitle: string }[]) {
-        const original: (Uint8Array | null)[] = [];
-        for (let i = 0; i < 4; i++) {
-            try {
-                original.push(await readUTOCSector(this.factoryInterface, i));
-            } catch (err) {
-                // The full-width title sector is optional
-                if (i < 3) throw err;
-                original.push(null);
-            }
-        }
-        const toc = parseTOC(...original);
-        splitDAOTrack(
-            toc,
-            trackIndex + 1,
-            tracks.map((t) => t.weight)
+        const untitled = await splitTrackInUTOC(
+            (index) => readUTOCSector(this.factoryInterface, index),
+            (index, data) => writeUTOCSector(this.factoryInterface, index, data),
+            trackIndex,
+            tracks
         );
-        // The first track keeps the title set during the upload. The others get
-        // theirs written straight into the ToC, since the device can't rename
-        // them through NetMD until the disc is reloaded.
-        const untitled: number[] = [];
-        for (let i = 1; i < tracks.length; i++) {
-            const { halfWidthTitle, fullWidthTitle } = tracks[i];
-            let fits = setTrackTitleInTOC(toc, trackIndex + 1 + i, encodeToSJIS(sanitizeHalfWidthTitle(halfWidthTitle)), false);
-            if (fullWidthTitle && original[3]) {
-                fits = setTrackTitleInTOC(toc, trackIndex + 1 + i, encodeToSJIS(sanitizeFullWidthTitle(fullWidthTitle)), true) && fits;
-            }
-            if (!fits) untitled.push(trackIndex + i);
-        }
-        const modified = reconstructTOC(toc, false);
-        for (let i = 0; i < modified.length; i++) {
-            const sector = modified[i];
-            if (sector && original[i] && sector.some((byte, j) => byte !== original[i]![j])) {
-                await writeUTOCSector(this.factoryInterface, i, sector);
-            }
-        }
         await (await this.exploitStateManager.require(ForceTOCEdit)).forceTOCEdit();
         return untitled;
     }
