@@ -15,6 +15,7 @@ import {
     convertTrackToNJS,
     Codec,
     WireformatDict,
+    splitTrackInUTOC,
 } from './netmd';
 import { AtracRecoveryConfig } from 'netmd-exploits';
 import { Mutex } from 'async-mutex';
@@ -515,19 +516,39 @@ class NetMDRemoteFactoryService implements NetMDFactoryService {
         return this.firmware;
     }
 
+    private async readSector(index: number) {
+        return new Uint8Array(await this.parent.getFromServer('factory/readUTOCSector', { index }));
+    }
+
+    private async writeSector(index: number, data: Uint8Array) {
+        await this.parent.getFromServer('factory/writeUTOCSector', { index, data: Array.from(data) }, 'POST');
+    }
+
     @asyncMutex
     async readUTOCSector(index: number) {
-        return new Uint8Array(await this.parent.getFromServer('factory/readUTOCSector', { index }));
+        return await this.readSector(index);
     }
 
     @asyncMutex
     async writeUTOCSector(index: number, data: Uint8Array) {
-        await this.parent.getFromServer('factory/writeUTOCSector', { index, data: Array.from(data) }, 'POST');
+        await this.writeSector(index, data);
     }
 
     @asyncMutex
     async flushUTOCCacheToDisc() {
         await this.parent.getFromServer('factory/flushUTOC');
+    }
+
+    @asyncMutex
+    async splitTrackForDAO(trackIndex: number, tracks: { weight: number; halfWidthTitle: string; fullWidthTitle: string }[]) {
+        const untitled = await splitTrackInUTOC(
+            (index) => this.readSector(index),
+            (index, data) => this.writeSector(index, data),
+            trackIndex,
+            tracks
+        );
+        await this.parent.getFromServer('factory/flushUTOC');
+        return untitled;
     }
 
     @asyncMutex
