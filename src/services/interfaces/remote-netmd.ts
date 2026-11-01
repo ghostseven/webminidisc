@@ -102,9 +102,9 @@ export class NetMDRemoteService extends NetMDService {
     }
 
     async getServiceCapabilities() {
-        if (this.capabilities === null) {
-            await this.fetchServerCapabilities();
-        }
+        // Fetched every time, like the USB service computes them: whether uploads and title edits
+        // are possible depends on the disc currently in the device.
+        await this.fetchServerCapabilities();
         return this.capabilities!;
     }
 
@@ -143,7 +143,9 @@ export class NetMDRemoteService extends NetMDService {
         }
         if (!jsonData.ok) {
             this.logger?.error({ method: path, jsonData });
-            throw new Error(`Remote NetMD: ${typeof jsonData.error === 'string' ? jsonData.error : `${path || 'connect'} failed`}`);
+            // The device's own errors are passed on as they are, so the app can recognize them
+            // (e.g. 'Rejected' while the device is still reading a disc).
+            throw new Error(typeof jsonData.error === 'string' ? jsonData.error : `Remote NetMD: ${path || 'connect'} failed`);
         }
         return jsonData.value;
     }
