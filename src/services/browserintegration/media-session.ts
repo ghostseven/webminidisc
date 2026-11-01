@@ -61,22 +61,22 @@ export class BrowserMediaSessionService {
 
         // Set mediaSession event handlers
         navigator.mediaSession.setActionHandler('previoustrack', () => {
-            this.dispatch(control('prev'));
+            this.sendControl('prev');
         });
         navigator.mediaSession.setActionHandler('nexttrack', () => {
-            this.dispatch(control('next'));
+            this.sendControl('next');
         });
         navigator.mediaSession.setActionHandler('pause', () => {
             audioEl.pause();
-            this.dispatch(control('pause'));
+            this.sendControl('pause');
         });
         navigator.mediaSession.setActionHandler('play', () => {
             audioEl.play();
-            this.dispatch(control('play'));
+            this.sendControl('play');
         });
 
         const debouncedSeek = debounce((time: number, trackNumber: number) => {
-            this.dispatch(control('seek', { time, trackNumber }));
+            this.sendControl('seek', { time, trackNumber });
             audioEl.currentTime = time;
         }, 100);
 
@@ -91,6 +91,16 @@ export class BrowserMediaSessionService {
         this.subscribe(() => {
             this.syncState();
         });
+    }
+
+    // Media keys can arrive at any time, e.g. between the tracks of an upload, when the device rejects
+    // playback commands. That's not worth an error message, so just log it.
+    private async sendControl(...args: Parameters<typeof control>) {
+        try {
+            await this.dispatch(control(...args));
+        } catch (err) {
+            console.log(`Media session: ${args[0]} failed`, err);
+        }
     }
 
     // This will save cpu cycles when just playing music. Might replace in the future with some memoization library
