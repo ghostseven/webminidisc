@@ -98,6 +98,8 @@ export const UploadDialog = (props: {}) => {
     } else if (discAtOnceStage === 'uploading') {
         conversionLabel = `Conversion completed`;
         uploadLabel = `Recording all ${trackTotal} tracks as one recording`;
+    } else if (discAtOnceStage === 'uploadingTracks') {
+        conversionLabel = `Conversion completed`;
     } else if (discAtOnceStage === 'splitting') {
         conversionLabel = `Conversion completed`;
         uploadLabel = `Splitting the recording into ${trackTotal} tracks (writing the ToC, this takes about a minute)`;

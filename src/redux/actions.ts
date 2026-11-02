@@ -38,6 +38,7 @@ import NotificationCompleteIconUrl from '../images/record-complete-notification-
 import { assertNumber, getHalfWidthTitleLength } from 'netmd-js/dist/utils';
 import { Capability, NetMDService, Disc, Codec, MinidiscSpec, ExploitCapability } from '../services/interfaces/netmd';
 import { getSimpleServices, ServiceConstructionInfo } from '../services/interface-service-manager';
+import { computeATRAC3SplitOffsets } from '../services/dao';
 import { checkFactoryCapability, initializeFactoryMode } from './factory/factory-actions';
 import { LibraryServices } from '../services/library-services';
 import { s16LEToSamplesArray, Shazam } from 'shazam-api';
@@ -1427,13 +1428,18 @@ export function convertAndUpload(
         // then encoded in one go, so the encoder never sees (or pads) a track boundary.
         // SP uploads are PCM anyway, so for those the decoded tracks can simply be joined.
         const daoEncodeAlbum = discAtOnce && transferCodecToExportCodec(format).codec !== 'PCM';
+        // Devices without the factory mode can't have their UTOC rewritten. For them, an album encoded in
+        // LP2 / LP4 is cut into tracks before the upload instead (as NetMD Wizard does).
+        const daoSplitBeforeUpload = daoEncodeAlbum && format.codec === 'AT3' && !deviceCapabilities.includes(Capability.factoryMode);
         if (discAtOnce) {
             if (files.some((e) => e.forcedEncoding !== null)) {
                 window.alert('Disc at Once cannot be used with files that are already ATRAC-encoded. Please remove them from the list.');
                 dispatch(convertDialogActions.setVisible(true));
                 return;
+            } else if (daoSplitBeforeUpload) {
+                // Needs nothing beyond a regular upload
             } else if (!deviceCapabilities.includes(Capability.factoryMode)) {
-                window.alert('Sorry! Your device cannot enter the factory mode. Disc at Once upload is not possible');
+                window.alert('Sorry! Your device cannot enter the factory mode. Disc at Once is only possible in LP2 or LP4 on it');
                 dispatch(convertDialogActions.setVisible(true));
                 return;
             } else if (
@@ -1773,20 +1779,44 @@ export function convertAndUpload(
                     dispatch(uploadDialogActions.setTrackEncodingProgress({ conversionStepName: null, state: 0, total: 0 }));
                     totalBytesAllTracks = daoBuffer.byteLength;
                 }
-                dispatch(uploadDialogActions.setDiscAtOnceStage('uploading'));
+                dispatch(uploadDialogActions.setDiscAtOnceStage(daoSplitBeforeUpload ? 'uploadingTracks' : 'uploading'));
                 console.log(`DAO: ${daoTracks.length} tracks ready (${daoBuffer.byteLength} bytes), starting the upload`);
                 await netmdService?.stop();
                 await netmdService?.prepareUpload();
                 uploadSessionOpen = true;
-                await netmdService?.upload(
-                    daoTracks[0].halfWidthTitle,
-                    daoTracks[0].fullWidthTitle,
-                    daoBuffer,
-                    format,
-                    updateUploadProgressCallback
-                );
+                if (daoSplitBeforeUpload) {
+                    // Every track's share of the recording is proportional to its decoded size
+                    const offsets = computeATRAC3SplitOffsets(
+                        daoBuffer.byteLength,
+                        daoTracks.map((t) => t.byteLength)
+                    );
+                    console.log(`DAO: cutting the recording into ${daoTracks.length} tracks before the upload`, offsets);
+                    for (let t = 0; t < daoTracks.length && !hasUploadBeenCancelled(); t++) {
+                        const { halfWidthTitle, fullWidthTitle } = daoTracks[t];
+                        trackUpdate.current = t + 1;
+                        trackUpdate.titleCurrent = [halfWidthTitle, fullWidthTitle].filter((e) => e).join(' / ');
+                        bytesSentFromPrevTracks = offsets[t];
+                        bytesSentFromThisTrack = 0;
+                        overallTrackStatsChanged();
+                        await netmdService?.upload(
+                            halfWidthTitle,
+                            fullWidthTitle,
+                            daoBuffer.slice(offsets[t], offsets[t + 1]),
+                            format,
+                            updateUploadProgressCallback
+                        );
+                    }
+                } else {
+                    await netmdService?.upload(
+                        daoTracks[0].halfWidthTitle,
+                        daoTracks[0].fullWidthTitle,
+                        daoBuffer,
+                        format,
+                        updateUploadProgressCallback
+                    );
+                    daoTrackIndex = disc!.trackCount;
+                }
                 console.log('DAO: upload finished');
-                daoTrackIndex = disc!.trackCount;
             } catch (err) {
                 error = err;
                 errorMessage = `Error uploading to device. There might not be enough space left, or an unknown error occurred.`;

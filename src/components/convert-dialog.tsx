@@ -293,11 +293,10 @@ export const ConvertDialog = (props: { files: (File | AdaptiveFile)[] }) => {
 
     const usesHimdTitles = useMemo(() => deviceCapabilities.includes(Capability.himdTitles), [deviceCapabilities]);
     const deviceSupportsFullWidth = useMemo(() => deviceCapabilities.includes(Capability.fullWidthSupport), [deviceCapabilities]);
-    // Disc at Once rewrites the NetMD UTOC through the factory mode exploits
-    const deviceSupportsDiscAtOnce = useMemo(
-        () => deviceCapabilities.includes(Capability.factoryMode) && !deviceCapabilities.includes(Capability.himdTitles),
-        [deviceCapabilities]
-    );
+    // Disc at Once rewrites the NetMD UTOC through the factory mode exploits. Without the factory mode,
+    // LP2 / LP4 albums are cut into tracks before the upload instead.
+    const discAtOnceNeedsHomebrew = useMemo(() => deviceCapabilities.includes(Capability.factoryMode), [deviceCapabilities]);
+    const deviceSupportsDiscAtOnce = useMemo(() => !deviceCapabilities.includes(Capability.himdTitles), [deviceCapabilities]);
 
     const currentlySelectedCodecIndex = useMemo(() => format[minidiscSpec.specName] ?? minidiscSpec.defaultFormat, [format, minidiscSpec]);
     const currentlySelectedCodec = useMemo(
@@ -837,10 +836,11 @@ export const ConvertDialog = (props: { files: (File | AdaptiveFile)[] }) => {
     const canUseDiscAtOnce = useMemo(
         () =>
             deviceSupportsDiscAtOnce &&
+            (discAtOnceNeedsHomebrew || currentlySelectedCodec.codec === 'AT3') &&
             titles.length > 1 &&
             // Already encoded ATRAC files can't be joined into one recording
             titles.every((n) => !n.forcedEncoding || (n.forcedEncoding.codec === 'MP3' && currentlySelectedCodec.codec !== 'MP3')),
-        [deviceSupportsDiscAtOnce, titles, currentlySelectedCodec]
+        [deviceSupportsDiscAtOnce, discAtOnceNeedsHomebrew, titles, currentlySelectedCodec]
     );
     // Disc at Once is always gapless, so it and the Gapless option can't be selected together
     const discAtOnceActive = enableDiscAtOnce && canUseDiscAtOnce;
@@ -938,6 +938,7 @@ export const ConvertDialog = (props: { files: (File | AdaptiveFile)[] }) => {
             enableGapless,
             handleToggleGapless,
             deviceSupportsDiscAtOnce,
+            discAtOnceNeedsHomebrew,
             canUseDiscAtOnce,
             discAtOnceActive,
             handleToggleDiscAtOnce,
@@ -1232,11 +1233,15 @@ export const ConvertDialog = (props: { files: (File | AdaptiveFile)[] }) => {
                         />
                         {deviceSupportsDiscAtOnce && (
                             <Tooltip
-                                title="Uploads all tracks as one continuous recording and splits it afterwards by rewriting the disc's ToC, so there are no gaps between tracks. Requires the homebrew mode. Not available for already ATRAC-encoded files, or together with Gapless."
+                                title={
+                                    discAtOnceNeedsHomebrew
+                                        ? "Uploads all tracks as one continuous recording and splits it afterwards by rewriting the disc's ToC, so there are no gaps between tracks. Requires the homebrew mode. Not available for already ATRAC-encoded files, or together with Gapless."
+                                        : 'Encodes all tracks as one continuous recording and cuts it into tracks before the upload, so there are no gaps between them. LP2 and LP4 only. Not available for already ATRAC-encoded files, or together with Gapless.'
+                                }
                                 arrow
                             >
                                 <FormControlLabel
-                                    label={`Disc at Once (homebrew)`}
+                                    label={discAtOnceNeedsHomebrew ? `Disc at Once (homebrew)` : `Disc at Once`}
                                     className={classes.advancedOption}
                                     disabled={!canUseDiscAtOnce || enableGapless}
                                     control={<Checkbox checked={enableDiscAtOnce && canUseDiscAtOnce} onChange={handleToggleDiscAtOnce} />}
