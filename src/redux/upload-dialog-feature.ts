@@ -3,7 +3,8 @@ import { stat } from 'fs';
 import { enableBatching } from 'redux-batched-actions';
 
 // Disc at Once uploads go through stages of their own instead of converting and uploading track by track
-export type DiscAtOnceStage = 'decoding' | 'encoding' | 'uploading' | 'splitting';
+// 'uploadingTracks': the recording was cut into tracks before the upload (devices without the factory mode)
+export type DiscAtOnceStage = 'decoding' | 'encoding' | 'uploading' | 'uploadingTracks' | 'splitting';
 
 export interface LoadingDialogState {
     visible: boolean;

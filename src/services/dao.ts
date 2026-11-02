@@ -179,6 +179,21 @@ export function splitDAOTrack(toc: ToC, trackNumber: number, weights: number[]) 
     return points;
 }
 
+// On the disc, ATRAC3 audio is stored in sound groups holding 384 bytes of it: one LP2 frame or two LP4 frames.
+const ATRAC3_SOUND_GROUP_BYTES = 384;
+
+// For devices without the factory mode, an album encoded in one go can also be cut into tracks
+// before the upload (as NetMD Wizard does): the encoder still never sees a track boundary.
+// Cutting on sound group boundaries means no track but the last one ends in a padded group.
+// Returns the byte offsets of the cuts, starting with 0 and ending with `byteLength`.
+export function computeATRAC3SplitOffsets(byteLength: number, weights: number[]): number[] {
+    const points = computeSplitPoints(Math.floor(byteLength / ATRAC3_SOUND_GROUP_BYTES), weights).map(
+        (p) => p * ATRAC3_SOUND_GROUP_BYTES
+    );
+    points[points.length - 1] = byteLength;
+    return points;
+}
+
 const TITLE_CELL_LENGTH = 7;
 
 // Writes an already encoded title for `trackNumber` into the UTOC title cells,

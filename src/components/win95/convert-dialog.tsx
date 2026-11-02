@@ -60,6 +60,7 @@ export const W95ConvertDialog = (props: {
     enableGapless: boolean;
     handleToggleGapless: () => void;
     deviceSupportsDiscAtOnce: boolean;
+    discAtOnceNeedsHomebrew: boolean;
     canUseDiscAtOnce: boolean;
     discAtOnceActive: boolean;
     handleToggleDiscAtOnce: () => void;
@@ -137,8 +138,12 @@ export const W95ConvertDialog = (props: {
                         {props.deviceSupportsDiscAtOnce ? (
                             <Checkbox
                                 name="discAtOnce"
-                                label="Disc at Once (homebrew)"
-                                title="Uploads all tracks as one continuous recording and splits it afterwards by rewriting the disc's ToC. Not available for already ATRAC-encoded files, or together with Gapless."
+                                label={props.discAtOnceNeedsHomebrew ? 'Disc at Once (homebrew)' : 'Disc at Once'}
+                                title={
+                                    props.discAtOnceNeedsHomebrew
+                                        ? "Uploads all tracks as one continuous recording and splits it afterwards by rewriting the disc's ToC. Not available for already ATRAC-encoded files, or together with Gapless."
+                                        : 'Encodes all tracks as one continuous recording and cuts it into tracks before the upload. LP2 and LP4 only. Not available for already ATRAC-encoded files, or together with Gapless.'
+                                }
                                 style={{ marginLeft: 16 }}
                                 disabled={!props.canUseDiscAtOnce || props.enableGapless}
                                 checked={props.discAtOnceActive}
