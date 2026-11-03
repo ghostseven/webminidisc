@@ -582,3 +582,77 @@ export function getDeviceNameFromTOCSignature(deviceId: number){
 }
 
 declare let process: any;
+
+export const WAV_HEADER_LENGTH = 44;
+
+// Converts 16-bit PCM between big and little endian, in place.
+export function swapS16Endianness(buffer: ArrayBuffer) {
+    const bytes = new Uint8Array(buffer);
+    for (let i = 0; i + 1 < bytes.length; i += 2) {
+        const a = bytes[i];
+        bytes[i] = bytes[i + 1];
+        bytes[i + 1] = a;
+    }
+}
+
+// Fills the first WAV_HEADER_LENGTH bytes of `buffer` with a header describing
+// the s16le 44.1kHz stereo PCM data that follows it.
+export function writeWAVHeader(buffer: ArrayBuffer) {
+    const view = new DataView(buffer);
+    const dataLength = buffer.byteLength - WAV_HEADER_LENGTH;
+    const ascii = (offset: number, text: string) => [...text].forEach((c, i) => view.setUint8(offset + i, c.charCodeAt(0)));
+    ascii(0, 'RIFF');
+    view.setUint32(4, dataLength + 36, true);
+    ascii(8, 'WAVE');
+    ascii(12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true); // PCM
+    view.setUint16(22, 2, true);
+    view.setUint32(24, 44100, true);
+    view.setUint32(28, 44100 * 4, true);
+    view.setUint16(32, 4, true);
+    view.setUint16(34, 16, true);
+    ascii(36, 'data');
+    view.setUint32(40, dataLength, true);
+}
+
+// Collects many ArrayBuffers into a single one without keeping all the parts around.
+// Uses a resizable ArrayBuffer where available, so that only one copy of the data exists.
+export class ByteAccumulator {
+    private buffer: ArrayBuffer | null = null;
+    private parts: ArrayBuffer[] = [];
+    private length = 0;
+
+    constructor() {
+        try {
+            this.buffer = new ArrayBuffer(0, { maxByteLength: 0x7fffffff });
+            if (!this.buffer.resizable || !this.buffer.transferToFixedLength) this.buffer = null;
+        } catch (_) {
+            this.buffer = null;
+        }
+    }
+
+    append(data: ArrayBuffer) {
+        if (this.buffer) {
+            this.buffer.resize(this.length + data.byteLength);
+            new Uint8Array(this.buffer).set(new Uint8Array(data), this.length);
+        } else {
+            this.parts.push(data);
+        }
+        this.length += data.byteLength;
+    }
+
+    finish(): ArrayBuffer {
+        if (this.buffer) {
+            return this.buffer.transferToFixedLength();
+        }
+        const result = new Uint8Array(this.length);
+        let offset = 0;
+        for (const part of this.parts) {
+            result.set(new Uint8Array(part), offset);
+            offset += part.byteLength;
+        }
+        this.parts = [];
+        return result.buffer;
+    }
+}
